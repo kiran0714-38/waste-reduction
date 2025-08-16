@@ -1,0 +1,39 @@
+food-waste-management/
+│── backend/
+│   │── server.js                 # Entry point (Express app setup)
+│   │── config/
+│   │   └── db.js                 # MongoDB connection
+│   │
+│   ├── routes/                   # All route definitions
+│   │   ├── authRoutes.js         # /api/auth/*
+│   │   ├── foodRoutes.js         # /api/foods/*
+│   │   ├── claimRoutes.js        # /api/claims/*
+│   │   └── adminRoutes.js        # /api/admin/*
+│   │
+│   ├── controllers/              # Logic for each route
+│   │   ├── authController.js
+│   │   ├── foodController.js
+│   │   ├── claimController.js
+│   │   └── adminController.js
+│   │
+│   ├── models/                   # Mongoose schemas
+│   │   ├── User.js
+│   │   ├── Food.js
+│   │   └── Claim.js
+│   │
+│   ├── middleware/               # Middleware
+│   │   ├── authMiddleware.js     # Protect routes (JWT check)
+│   │   └── roleMiddleware.js     # Check roles (donor/receiver/admin)
+│   │
+│   ├── utils/                    # Helper functions
+│   │   ├── geoUtils.js           # For nearby search (lat/lng)
+│   │   └── tokenUtils.js         # Generate & verify JWT
+│   │
+│   ├── jobs/                     # Cron jobs / background tasks
+│   │   └── foodExpiryJob.js      # Auto-remove expired food
+│   │
+│   ├── logs/                     # (Optional) logs for debugging
+│   │
+│   └── .env                      # Environment variables (DB, JWT, etc.)
+│
+└── frontend/                     # React app (later stage)

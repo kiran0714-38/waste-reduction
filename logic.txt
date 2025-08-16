@@ -1,0 +1,319 @@
+# 🍽️ Food Waste Management (MERN) — Full Logic Blueprint
+
+*No code — complete architecture, flows, validations, and responsibilities for backend & frontend.*
+
+---
+
+## 1) Actors & Roles
+
+* **Donor** (restaurant, household, store)
+* **Receiver – Individual**
+* **Receiver – Organization** (orphanage, shelter, NGO)
+* **Admin**
+
+Role keys used below: `DNR`, `RCV_IND`, `RCV_ORG`, `ADM`
+
+---
+
+## 2) Core Domain Objects
+
+* **User**: profile, role, contact, location (Point), org metadata (if `RCV_ORG`)
+* **FoodListing**: surplus food ad with portions, tags, time windows, location, status
+* **Claim**: reservation/approval/collection flow between receiver and donor
+* **Impact**: meals saved & CO₂ equivalent, for analytics/leaderboard
+
+---
+
+## 3) State Machines
+
+### 3.1 FoodListing Status
+
+`DRAFT` → `READY` → (`CLAIMED` → `COLLECTED`) | `CANCELLED` | `EXPIRED`
+
+* **Transitions**
+
+  * `DRAFT→READY` by donor when form complete
+  * `READY→CLAIMED` when any receiver claims
+  * `CLAIMED→COLLECTED` after OTP verified at pickup
+  * `READY|CLAIMED→CANCELLED` by owner/admin
+  * `READY→EXPIRED` auto when `bestBefore < now`
+
+### 3.2 Claim Status
+
+`PENDING` → `APPROVED` → `PICKUP_OTP_SENT` → `COMPLETED` | `REJECTED` | `CANCELLED`
+
+* Optional **approval** step (toggleable in settings). If approval disabled: `PENDING` → `PICKUP_OTP_SENT`.
+
+---
+
+## 4) Permissions Matrix
+
+| Action                            | DNR | RCV\_IND | RCV\_ORG | ADM |
+| --------------------------------- | --: | -------: | -------: | --: |
+| Create listing                    |   ✅ |        ❌ |        ❌ |   ✅ |
+| Edit own listing                  |   ✅ |        ❌ |        ❌ |   ✅ |
+| Delete own listing                |   ✅ |        ❌ |        ❌ |   ✅ |
+| Search/nearby listings            |   ✅ |        ✅ |        ✅ |   ✅ |
+| Claim listing                     |   ❌ |        ✅ |        ✅ |   ✅ |
+| Approve/Reject claim (if enabled) |   ✅ |        ❌ |        ❌ |   ✅ |
+| Mark collected (OTP verify)       |   ❌ |  ✅ (own) |  ✅ (own) |   ✅ |
+| Manage users/reports              |   ❌ |        ❌ |        ❌ |   ✅ |
+
+---
+
+## 5) Backend Logic (Express — responsibilities only)
+
+### 5.1 Modules
+
+* **Auth**: register/login/logout, refresh tokens, profile read/update
+* **Listings**: CRUD, filters, nearby, claim/collect transitions
+* **Claims**: create, approve/reject, complete, my-claims, listing-claims
+* **Admin**: users, reports, moderation, leaderboards
+* **Jobs**: expiry, stale-claim release, leaderboard refresh
+* **Notifications**: email/SMS/push hooks
+
+### 5.2 Validations (request-level)
+
+* **Auth**: email format, strong password, role in enum, location present
+* **Listing**: required fields (title, portions≥1, time windows, `bestBefore > now`, `pickupWindowStart < pickupWindowEnd`), geo Point `[lng,lat]`
+* **Claim**: `foodId` exists & `status=READY` (or `CLAIMED` if multi-claim disabled), quantity requested ≤ available (if partial allowed), receiver role check, distance ≤ policy (optional)
+* **Collect**: OTP must match latest active claim; time within pickup window
+
+### 5.3 Filters / Query Logic
+
+* **GET /api/foods**
+
+  * Filters: `status` (default `READY`), `tags` (`veg,gluten-free`), `city`, `minPortions`, `createdAfter`, `sort=nearest|latest|expiring`
+  * Pagination: `page`, `limit` (cap 50)
+* **GET /api/foods/nearby?lat\&lng\&radius(km)**
+
+  * Geo index 2dsphere; `$near` with `$maxDistance = radius*1000`
+  * Exclude `EXPIRED`,`CANCELLED`
+  * Sort by distance then `bestBefore` ascending
+
+### 5.4 Claiming Policies
+
+* **Single-claim mode** (default): Only 1 active claim allowed per listing → on claim set `status=CLAIMED`
+* **Partial-claim mode** (optional): listing exposes `availablePortions`; multiple claims allowed until 0 → then `READY→CLAIMED` or `COLLECTED`
+* **Org priority** (optional): if `RCV_ORG` and `availablePortions` ≥ org minimum, prioritize in matching/notifications
+
+### 5.5 OTP Handover
+
+* Generate 6-digit numeric OTP on `APPROVED` (or claim accepted phase)
+* Store hashed OTP + expiry (e.g., 45 min)
+* On `collect`, verify OTP + receiver identity + listing state; write Impact
+
+### 5.6 Impact Calculation
+
+* `mealsSaved = portionsCollected`
+* `co2SavedKg = mealsSaved * CO2_PER_MEAL_KG` (configurable env)
+* Append Impact document; aggregate nightly for reports
+
+### 5.7 Rate limits & Abuse Controls
+
+* Per-IP and per-user limits on listing create & claim
+* Soft-delete for users/listings, audit logs
+* Org verification flag required for higher claim caps
+
+### 5.8 Background Jobs (Schedules)
+
+* **Expire listings**: every 5 min → `bestBefore < now` ⇒ `EXPIRED`
+* **Release stale claims**: if `PENDING/APPROVED` older than X hrs without pickup ⇒ cancel, revert availability
+* **Leaderboard refresh**: hourly cache of top donors/receivers by city & globally
+
+### 5.9 Error Model (API)
+
+```
+{
+  "error": { "code": "CLAIM_NOT_ALLOWED", "message": "Listing not in READY state" },
+  "meta": { "requestId": "..." }
+}
+```
+
+---
+
+## 6) API Contract (selected endpoints — shapes only)
+
+### 6.1 Auth
+
+**POST /api/auth/register**
+
+* Body: `{ name, email, password, role, city, phone, org?: { name, regId }, location: { lng, lat } }`
+* Success: `{ id, name, role, token, refreshToken }`
+
+**POST /api/auth/login**
+
+* Body: `{ email, password }`
+* Success: `{ id, name, role, token, refreshToken }`
+
+**GET /api/auth/profile** → auth
+
+* Success: `{ id, name, email, role, city, location, org?, stats }`
+
+### 6.2 Listings
+
+**POST /api/listings** → donor/admin
+
+* Body: `{ title, description, portions, tags[], pickupWindowStart, pickupWindowEnd, bestBefore, address, geo:{lng,lat}, hygieneChecklist{...} }`
+* Success: `{ id, status:"READY", ... }`
+
+**GET /api/listings/nearby?lat\&lng\&radius\&tags\&status**
+
+* Success: `{ items: [ { id, title, portions, distanceKm, bestBefore, donor:{id,name}, tags } ], page, nextPage }`
+
+**PATCH /api/listings/\:id/cancel** → owner/admin
+
+* Success: `{ id, status:"CANCELLED" }`
+
+### 6.3 Claims
+
+**POST /api/claims** → receiver
+
+* Body: `{ foodId, quantity?, notes? }`
+* Validations: role receiver; listing READY; not expired; optional quantity ≤ available
+* Success: `{ id, status:"PENDING"|"PICKUP_OTP_SENT", pickupOtpSent:true }`
+
+**PUT /api/claims/\:id/approve** → donor/admin (if approval enabled)
+
+
+* Success: `{ id, status:"PICKUP_OTP_SENT" }`
+
+**PUT /api/claims/\:id/complete** → receiver
+
+* Body: `{ otp }`
+* Success: `{ id, status:"COMPLETED" }` + listing state transition
+
+### 6.4 Admin
+
+**GET /api/admin/reports?city\&from\&to** → usage, impacts, active users
+
+---
+
+## 7) Frontend Logic (React) — Responsibilities & Data Flow
+
+### 7.1 Global State
+
+* **AuthStore**: `{ user, token, role, location }`
+* **ListingsStore**: filters `{ tags, radiusKm, city }`, pagination, `items[]`
+* **ClaimsStore**: `myClaims[]` with statuses, active OTP (if any)
+
+### 7.2 Pages & Flows
+
+1. **Auth Pages** (Login / Register)
+
+   * Register captures role and (if org) org fields
+   * On success → save token, fetch profile, route by role
+
+2. **Home / Nearby (Receiver)**
+
+   * On mount: request browser geolocation → fall back to city selector
+   * Call `/api/listings/nearby` with `{ lat,lng,radius }`
+   * Render list cards with distance & best-before countdown; filters by tags & radius
+   * CTA: **Claim** → opens claim modal → POST `/api/claims`
+
+3. **Donor Dashboard**
+
+   * "Create Listing" wizard with validation & live time-window checks
+   * View own listings by status, quick actions: Cancel, Edit, Mark Ready
+   * If approval mode on: Approve/Reject claims list
+
+4. **Claim Details (Receiver)**
+
+   * Shows claim status timeline; if `PICKUP_OTP_SENT`, display OTP instructions
+   * After pickup: enter OTP → PUT complete
+
+5. **Admin Panel**
+
+   * Tables: Users/Orgs verification, Listings moderation, Reports charts
+
+### 7.3 UI State Machines (micro-interactions)
+
+* **ListingCard**
+
+  * `READY`: buttons → Claim / View Map
+  * `CLAIMED` (owner view): show claimant + contact (masked)
+  * Countdown badge color changes as `bestBefore` nears
+
+* **ClaimButton**
+
+  * Debounced, disabled while pending; handles API errors (e.g., already claimed)
+
+### 7.4 Input Validations (client)
+
+* Mirror server rules; show inline errors
+* Prevent `bestBefore` earlier than `pickupWindowEnd`
+* Require geo coords and address
+
+### 7.5 Error/Empty States
+
+* **Nearby list empty**: suggest increasing radius or switching to city search
+* **Network error**: retry banner with exponential backoff
+
+### 7.6 Accessibility & UX
+
+* Keyboard-focus outlines, ARIA roles for lists/buttons
+* Localized date/time (user timezone); humanized relative times
+
+### 7.7 Performance
+
+* Pagination + infinite scroll for lists
+* Client-side cache per filter (keyed by `lat|lng|radius|tags`)
+* Image lazy-loading; thumbnail sizes
+
+### 7.8 Security (client)
+
+* Store JWT in memory (or HTTPOnly cookies if SSR); renew on 401 → refresh flow
+* Mask phone/email until claim approved
+
+---
+
+## 8) Matching & Notifications Logic
+
+* **Matching trigger**: on `listing READY`, compute nearest eligible receivers within city/radius
+* **Score** = proximity (0–1) \*0.5 + urgency \*0.3 + portions \*0.2
+* Notify top N via email/push; include deep link to listing
+* **Dedup**: don’t notify same receiver twice within 30 min window for the same listing
+
+---
+
+## 9) Configuration & Policies
+
+* `MAX_RADIUS_KM` default 10
+* `CO2_PER_MEAL_KG` default 0.5
+* `ORG_MIN_PORTIONS` default 10
+* `CLAIM_APPROVAL_REQUIRED` (bool)
+* `OTP_TTL_MINUTES` default 45
+
+---
+
+## 10) Observability & Ops
+
+* **Request logging** with masked PII
+* **Audit trail** for state transitions (who, when, from→to)
+* **Metrics**: API latency, claim conversion rate, average pickup time, expiry rate
+* **Alerts**: job failures, high expiry ratio, unusual claim spikes
+
+---
+
+## 11) Test Plan (what to test)
+
+* Auth: register/login/refresh, role enforcement
+* Listings: create → ready → claim → collect; validation & permission negatives
+* Nearby search: distance correctness, pagination, tag filters
+* Claims: double-claim prevention, OTP failure paths, stale release
+* Admin: reports accuracy, org verification effect on caps
+
+---
+
+## 12) Delivery Checklist
+
+* [ ] Roles & permissions seeded
+* [ ] Geo indexes created on FoodListing
+* [ ] Env policies set (radius, OTP TTL, CO₂ factor)
+* [ ] Jobs scheduled (expiry, stale-claim release)
+* [ ] Frontend feature flags wired (approval mode)
+* [ ] Error dictionary mapped to user-friendly messages
+
+---
+
+### You now have a full, code-free logic design to implement both backend and frontend confidently. Next, we can tailor the policies (radius, OTP TTL, org limits) to your target city and audience.
